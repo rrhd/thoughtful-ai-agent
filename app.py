@@ -90,8 +90,8 @@ class Agent:
 
         ranked = sorted(results, key=lambda r: r[2], reverse=True)
         context = "\n\n".join(
-            f"[{score:.2f}] Q: {question}\nA: {answer}"
-            for question, answer, score in ranked
+            f"Q: {question}\nA: {answer}"
+            for question, answer, _score in ranked
         )
         prompt = self.prompt_template.replace("{{CONTEXT}}", context)
 
