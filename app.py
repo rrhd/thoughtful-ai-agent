@@ -1,14 +1,4 @@
-"""
-Thoughtful AI Customer Support Agent
-
-TF-IDF cosine similarity retrieves answers from a predefined knowledge base.
-OpenAI LLM fallback handles questions outside the knowledge base scope.
-
-TF-IDF chosen over embedding models: the knowledge base is small (5 entries)
-and TF-IDF gives effective keyword-overlap matching without model downloads
-or extra API calls for the retrieval step.
-"""
-
+"""Thoughtful AI Customer Support Agent"""
 import gradio as gr
 from openai import OpenAI, OpenAIError
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -62,7 +52,7 @@ KNOWLEDGE_BASE = [
 QUESTIONS = [entry["question"] for entry in KNOWLEDGE_BASE]
 ANSWERS = [entry["answer"] for entry in KNOWLEDGE_BASE]
 
-vectorizer = TfidfVectorizer()
+vectorizer = TfidfVectorizer(stop_words="english")
 question_vectors = vectorizer.fit_transform(QUESTIONS)
 
 # 0.3 catches paraphrases ("what does EVA do?") while rejecting unrelated
@@ -150,7 +140,6 @@ def respond(
 
 demo = gr.ChatInterface(
     fn=respond,
-    type="messages",
     title="Thoughtful AI Support Agent",
     description=(
         "Ask me about Thoughtful AI's healthcare automation agents, "
@@ -161,7 +150,6 @@ demo = gr.ChatInterface(
         "Tell me about your agents",
         "What are the benefits of using Thoughtful AI?",
     ],
-    theme=gr.themes.Soft(),
 )
 
 if __name__ == "__main__":
