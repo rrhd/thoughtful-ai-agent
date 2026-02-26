@@ -1,4 +1,6 @@
 """Thoughtful AI Customer Support Agent"""
+from pathlib import Path
+
 import gradio as gr
 from openai import OpenAI, OpenAIError
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -72,25 +74,14 @@ def search_knowledge_base(query: str) -> str | None:
     return None
 
 
-def build_system_prompt() -> str:
-    """Embed the full knowledge base into the LLM system prompt."""
-    qa_text = "\n\n".join(
+PROMPT_TEMPLATE = Path(__file__).parent.joinpath("system_prompt.txt").read_text()
+SYSTEM_PROMPT = PROMPT_TEMPLATE.replace(
+    "{{KNOWLEDGE_BASE}}",
+    "\n\n".join(
         f"Q: {entry['question']}\nA: {entry['answer']}"
         for entry in KNOWLEDGE_BASE
-    )
-    return (
-        "You are a customer support agent for Thoughtful AI, a company that "
-        "builds AI-powered automation agents for healthcare revenue cycle "
-        "management.\n\n"
-        "Official product information:\n\n"
-        f"{qa_text}\n\n"
-        "Use this information when answering questions about Thoughtful AI. "
-        "For unrelated questions, respond helpfully using general knowledge. "
-        "Be professional and concise."
-    )
-
-
-SYSTEM_PROMPT = build_system_prompt()
+    ),
+)
 
 
 def get_llm_response(
