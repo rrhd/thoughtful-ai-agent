@@ -1,12 +1,11 @@
 """Thoughtful AI Customer Support Agent
 
-FAISS nearest-neighbor search over sentence embeddings for knowledge base
+FAISS nearest-neighbor search over OpenAI embeddings for knowledge base
 retrieval, with async OpenAI LLM fallback for unmatched questions.
 
-Sentence embeddings + FAISS chosen over TF-IDF: dense embeddings capture
-semantic similarity (not just keyword overlap), and FAISS scales to millions
-of entries via approximate nearest-neighbor search. IndexFlatIP is used here
-for exact search; for >1M entries, swap to IndexIVFFlat or IndexHNSWFlat.
+OpenAI embeddings + FAISS: dense embeddings capture semantic similarity,
+FAISS scales to millions of entries. IndexFlatIP is used here for exact
+search; for >1M entries, swap to IndexIVFFlat or IndexHNSWFlat.
 """
 
 import json
@@ -16,8 +15,7 @@ import click
 import faiss
 import gradio as gr
 import numpy as np
-from openai import AsyncOpenAI, OpenAIError
-from sentence_transformers import SentenceTransformer
+from openai import AsyncOpenAI, OpenAI, OpenAIError
 
 APP_DIR = Path(__file__).parent
 
@@ -27,17 +25,44 @@ def load_knowledge_base(kb_path: Path) -> list[dict[str, str]]:
     return json.loads(kb_path.read_text())["questions"]
 
 
+def embed_sync(
+    client: OpenAI,
+    model: str,
+    texts: list[str],
+) -> np.ndarray:
+    """Embed texts via OpenAI (sync) and return L2-normalized float32 matrix."""
+    response = client.embeddings.create(model=model, input=texts)
+    matrix = np.array(
+        [item.embedding for item in response.data], dtype=np.float32,
+    )
+    faiss.normalize_L2(matrix)
+    return matrix
+
+
+async def embed_async(
+    client: AsyncOpenAI,
+    model: str,
+    texts: list[str],
+) -> np.ndarray:
+    """Embed texts via OpenAI (async) and return L2-normalized float32 matrix."""
+    response = await client.embeddings.create(model=model, input=texts)
+    matrix = np.array(
+        [item.embedding for item in response.data], dtype=np.float32,
+    )
+    faiss.normalize_L2(matrix)
+    return matrix
+
+
 def build_faiss_index(
     questions: list[str],
-    encoder: SentenceTransformer,
+    client: OpenAI,
+    embedding_model: str,
 ) -> faiss.IndexFlatIP:
-    """Encode questions and build a FAISS inner-product index.
+    """Embed questions and build a FAISS inner-product index.
 
     Vectors are L2-normalized, so inner product == cosine similarity.
     """
-    embeddings = encoder.encode(
-        questions, normalize_embeddings=True,
-    ).astype(np.float32)
+    embeddings = embed_sync(client, embedding_model, questions)
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
     return index
@@ -54,13 +79,13 @@ def render_system_prompt(entries: list[dict[str, str]]) -> str:
 
 
 class Agent:
-    """Chat agent backed by FAISS retrieval and async OpenAI fallback."""
+    """Chat agent backed by async FAISS retrieval and async OpenAI fallback."""
 
     def __init__(
         self,
         client: AsyncOpenAI,
         llm_model: str,
-        encoder: SentenceTransformer,
+        embedding_model: str,
         index: faiss.IndexFlatIP,
         answers: list[str],
         threshold: float,
@@ -68,17 +93,15 @@ class Agent:
     ):
         self.client = client
         self.llm_model = llm_model
-        self.encoder = encoder
+        self.embedding_model = embedding_model
         self.index = index
         self.answers = answers
         self.threshold = threshold
         self.system_prompt = system_prompt
 
-    def search(self, query: str) -> str | None:
-        """FAISS nearest-neighbor lookup against the knowledge base."""
-        query_vec = self.encoder.encode(
-            [query], normalize_embeddings=True,
-        ).astype(np.float32)
+    async def search(self, query: str) -> str | None:
+        """Embed query via async OpenAI, then FAISS nearest-neighbor lookup."""
+        query_vec = await embed_async(self.client, self.embedding_model, [query])
         scores, indices = self.index.search(query_vec, 1)
         if scores[0][0] >= self.threshold:
             return self.answers[indices[0][0]]
@@ -89,11 +112,11 @@ class Agent:
         message: str,
         history: list[dict[str, str]],
     ) -> str:
-        """Route to KB search or async LLM fallback."""
+        """Route to async KB search or async LLM fallback."""
         if not message or not message.strip():
             return "Please enter a question and I'll do my best to help."
 
-        kb_answer = self.search(message)
+        kb_answer = await self.search(message)
         if kb_answer is not None:
             return kb_answer
 
@@ -119,13 +142,13 @@ class Agent:
 
 
 @click.command()
-@click.option("--model", type=str, required=True, help="OpenAI model name.")
+@click.option("--model", type=str, required=True, help="OpenAI chat model name.")
+@click.option(
+    "--embedding-model", type=str, required=True,
+    help="OpenAI embedding model name.",
+)
 @click.option("--api-key", type=str, required=True, help="OpenAI API key.")
 @click.option("--port", type=int, required=True, help="Port to serve on.")
-@click.option(
-    "--encoder-model", type=str, required=True,
-    help="Sentence-transformers model name for KB retrieval.",
-)
 @click.option(
     "--kb-path", type=click.Path(exists=True, path_type=Path), required=True,
     help="Path to knowledge_base.json.",
@@ -137,9 +160,9 @@ class Agent:
 @click.option("--share", is_flag=True, help="Create a public Gradio share link.")
 def main(
     model: str,
+    embedding_model: str,
     api_key: str,
     port: int,
-    encoder_model: str,
     kb_path: Path,
     threshold: float,
     share: bool,
@@ -147,15 +170,19 @@ def main(
     entries = load_knowledge_base(kb_path)
     questions = [entry["question"] for entry in entries]
     answers = [entry["answer"] for entry in entries]
-    encoder = SentenceTransformer(encoder_model)
-    index = build_faiss_index(questions, encoder)
+
+    # Sync client for one-time startup index build (no event loop yet)
+    sync_client = OpenAI(api_key=api_key)
+    index = build_faiss_index(questions, sync_client, embedding_model)
+
+    # Async client for runtime search + chat (used inside Gradio's event loop)
+    async_client = AsyncOpenAI(api_key=api_key)
     system_prompt = render_system_prompt(entries)
-    client = AsyncOpenAI(api_key=api_key)
 
     agent = Agent(
-        client=client,
+        client=async_client,
         llm_model=model,
-        encoder=encoder,
+        embedding_model=embedding_model,
         index=index,
         answers=answers,
         threshold=threshold,
