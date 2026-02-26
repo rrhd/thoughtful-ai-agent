@@ -88,9 +88,10 @@ class Agent:
         if results and results[0][2] >= self.config["retrieval"]["threshold"]:
             return results[0][1]
 
+        ranked = sorted(results, key=lambda r: r[2], reverse=True)
         context = "\n\n".join(
-            f"Q: {question}\nA: {answer}"
-            for question, answer, score in results
+            f"[{score:.2f}] Q: {question}\nA: {answer}"
+            for question, answer, score in ranked
         )
         prompt = self.prompt_template.replace("{{CONTEXT}}", context)
 
