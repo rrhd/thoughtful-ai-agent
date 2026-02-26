@@ -55,8 +55,8 @@ ANSWERS = [entry["answer"] for entry in KNOWLEDGE_BASE]
 vectorizer = TfidfVectorizer(stop_words="english")
 question_vectors = vectorizer.fit_transform(QUESTIONS)
 
-# 0.3 catches paraphrases ("what does EVA do?") while rejecting unrelated
-# queries. Tuned empirically against the predefined dataset.
+# With English stop words filtered, irrelevant queries score 0.0 and relevant
+# paraphrases score 0.4+. Any threshold in that gap works; 0.3 is conservative.
 SIMILARITY_THRESHOLD = 0.3
 
 
