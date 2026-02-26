@@ -1,0 +1,168 @@
+"""
+Thoughtful AI Customer Support Agent
+
+TF-IDF cosine similarity retrieves answers from a predefined knowledge base.
+OpenAI LLM fallback handles questions outside the knowledge base scope.
+
+TF-IDF chosen over embedding models: the knowledge base is small (5 entries)
+and TF-IDF gives effective keyword-overlap matching without model downloads
+or extra API calls for the retrieval step.
+"""
+
+import gradio as gr
+from openai import OpenAI, OpenAIError
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+KNOWLEDGE_BASE = [
+    {
+        "question": "What does the eligibility verification agent (EVA) do?",
+        "answer": (
+            "EVA automates the process of verifying a patient's eligibility "
+            "and benefits information in real-time, eliminating manual data "
+            "entry errors and reducing claim rejections."
+        ),
+    },
+    {
+        "question": "What does the claims processing agent (CAM) do?",
+        "answer": (
+            "CAM streamlines the submission and management of claims, "
+            "improving accuracy, reducing manual intervention, and "
+            "accelerating reimbursements."
+        ),
+    },
+    {
+        "question": "How does the payment posting agent (PHIL) work?",
+        "answer": (
+            "PHIL automates the posting of payments to patient accounts, "
+            "ensuring fast, accurate reconciliation of payments and "
+            "reducing administrative burden."
+        ),
+    },
+    {
+        "question": "Tell me about Thoughtful AI's Agents.",
+        "answer": (
+            "Thoughtful AI provides a suite of AI-powered automation agents "
+            "designed to streamline healthcare processes. These include "
+            "Eligibility Verification (EVA), Claims Processing (CAM), and "
+            "Payment Posting (PHIL), among others."
+        ),
+    },
+    {
+        "question": "What are the benefits of using Thoughtful AI's agents?",
+        "answer": (
+            "Using Thoughtful AI's Agents can significantly reduce "
+            "administrative costs, improve operational efficiency, and "
+            "reduce errors in critical processes like claims management "
+            "and payment posting."
+        ),
+    },
+]
+
+QUESTIONS = [entry["question"] for entry in KNOWLEDGE_BASE]
+ANSWERS = [entry["answer"] for entry in KNOWLEDGE_BASE]
+
+vectorizer = TfidfVectorizer()
+question_vectors = vectorizer.fit_transform(QUESTIONS)
+
+# 0.3 catches paraphrases ("what does EVA do?") while rejecting unrelated
+# queries. Tuned empirically against the predefined dataset.
+SIMILARITY_THRESHOLD = 0.3
+
+
+def search_knowledge_base(query: str) -> str | None:
+    """Find the best predefined answer via TF-IDF cosine similarity.
+
+    Returns the answer text if similarity >= threshold, else None.
+    """
+    query_vector = vectorizer.transform([query])
+    similarities = cosine_similarity(query_vector, question_vectors)[0]
+    best_idx = int(similarities.argmax())
+    best_score = float(similarities[best_idx])
+    if best_score >= SIMILARITY_THRESHOLD:
+        return ANSWERS[best_idx]
+    return None
+
+
+def build_system_prompt() -> str:
+    """Embed the full knowledge base into the LLM system prompt."""
+    qa_text = "\n\n".join(
+        f"Q: {entry['question']}\nA: {entry['answer']}"
+        for entry in KNOWLEDGE_BASE
+    )
+    return (
+        "You are a customer support agent for Thoughtful AI, a company that "
+        "builds AI-powered automation agents for healthcare revenue cycle "
+        "management.\n\n"
+        "Official product information:\n\n"
+        f"{qa_text}\n\n"
+        "Use this information when answering questions about Thoughtful AI. "
+        "For unrelated questions, respond helpfully using general knowledge. "
+        "Be professional and concise."
+    )
+
+
+SYSTEM_PROMPT = build_system_prompt()
+
+
+def get_llm_response(
+    message: str,
+    history: list[dict[str, str]],
+) -> str:
+    """Call OpenAI for questions not matched by the knowledge base."""
+    client = OpenAI()
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+    ]
+    messages.extend(history)
+    messages.append({"role": "user", "content": message})
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+    )
+    return response.choices[0].message.content
+
+
+def respond(
+    message: str,
+    history: list[dict[str, str]],
+) -> str:
+    """Route user input to knowledge base search or LLM fallback."""
+    if not message or not message.strip():
+        return "Please enter a question and I'll do my best to help."
+
+    kb_answer = search_knowledge_base(message)
+    if kb_answer is not None:
+        return kb_answer
+
+    try:
+        return get_llm_response(message, history)
+    except OpenAIError:
+        return (
+            "I couldn't find a matching answer in our knowledge base, "
+            "and my AI assistant is currently unavailable. "
+            "Please try again later or contact support@thoughtful.ai."
+        )
+    except Exception:
+        return "Something went wrong. Please try again."
+
+
+demo = gr.ChatInterface(
+    fn=respond,
+    type="messages",
+    title="Thoughtful AI Support Agent",
+    description=(
+        "Ask me about Thoughtful AI's healthcare automation agents, "
+        "including EVA, CAM, and PHIL."
+    ),
+    examples=[
+        "What does EVA do?",
+        "Tell me about your agents",
+        "What are the benefits of using Thoughtful AI?",
+    ],
+    theme=gr.themes.Soft(),
+)
+
+if __name__ == "__main__":
+    demo.launch()
