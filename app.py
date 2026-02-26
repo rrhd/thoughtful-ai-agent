@@ -22,12 +22,9 @@ from sentence_transformers import SentenceTransformer
 APP_DIR = Path(__file__).parent
 
 
-def load_knowledge_base(kb_path: Path) -> tuple[list[str], list[str]]:
-    """Load questions and answers from the knowledge base JSON file."""
-    data = json.loads(kb_path.read_text())
-    questions = [entry["question"] for entry in data["questions"]]
-    answers = [entry["answer"] for entry in data["questions"]]
-    return questions, answers
+def load_knowledge_base(kb_path: Path) -> list[dict[str, str]]:
+    """Load entries from the knowledge base JSON file."""
+    return json.loads(kb_path.read_text())["questions"]
 
 
 def build_faiss_index(
@@ -46,13 +43,12 @@ def build_faiss_index(
     return index
 
 
-def render_system_prompt(kb_path: Path) -> str:
-    """Load the prompt template and inject knowledge base Q&A pairs."""
-    data = json.loads(kb_path.read_text())
+def render_system_prompt(entries: list[dict[str, str]]) -> str:
+    """Inject knowledge base Q&A pairs into the prompt template."""
     template = APP_DIR.joinpath("system_prompt.txt").read_text()
     qa_text = "\n\n".join(
         f"Q: {entry['question']}\nA: {entry['answer']}"
-        for entry in data["questions"]
+        for entry in entries
     )
     return template.replace("{{KNOWLEDGE_BASE}}", qa_text)
 
@@ -148,10 +144,12 @@ def main(
     threshold: float,
     share: bool,
 ) -> None:
-    questions, answers = load_knowledge_base(kb_path)
+    entries = load_knowledge_base(kb_path)
+    questions = [entry["question"] for entry in entries]
+    answers = [entry["answer"] for entry in entries]
     encoder = SentenceTransformer(encoder_model)
     index = build_faiss_index(questions, encoder)
-    system_prompt = render_system_prompt(kb_path)
+    system_prompt = render_system_prompt(entries)
     client = AsyncOpenAI(api_key=api_key)
 
     agent = Agent(
