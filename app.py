@@ -1,8 +1,10 @@
 """Thoughtful AI Customer Support Agent"""
+
 from pathlib import Path
 
+import click
 import gradio as gr
-from openai import OpenAI, OpenAIError
+from openai import AsyncOpenAI, OpenAIError
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 KNOWLEDGE_BASE = [
@@ -60,6 +62,15 @@ question_vectors = vectorizer.fit_transform(QUESTIONS)
 # paraphrases score 0.4+. Any threshold in that gap works; 0.3 is conservative.
 SIMILARITY_THRESHOLD = 0.3
 
+PROMPT_TEMPLATE = Path(__file__).parent.joinpath("system_prompt.txt").read_text()
+SYSTEM_PROMPT = PROMPT_TEMPLATE.replace(
+    "{{KNOWLEDGE_BASE}}",
+    "\n\n".join(
+        f"Q: {entry['question']}\nA: {entry['answer']}"
+        for entry in KNOWLEDGE_BASE
+    ),
+)
+
 
 def search_knowledge_base(query: str) -> str | None:
     """Find the best predefined answer via TF-IDF cosine similarity.
@@ -74,72 +85,68 @@ def search_knowledge_base(query: str) -> str | None:
     return None
 
 
-PROMPT_TEMPLATE = Path(__file__).parent.joinpath("system_prompt.txt").read_text()
-SYSTEM_PROMPT = PROMPT_TEMPLATE.replace(
-    "{{KNOWLEDGE_BASE}}",
-    "\n\n".join(
-        f"Q: {entry['question']}\nA: {entry['answer']}"
-        for entry in KNOWLEDGE_BASE
-    ),
-)
+def build_respond(client: AsyncOpenAI, model: str):  # noqa: no-nested -- closure binds CLI config to Gradio callback
+    """Build the async response handler with bound client and model."""
+
+    async def respond(
+        message: str,
+        history: list[dict[str, str]],
+    ) -> str:
+        """Route user input to knowledge base search or LLM fallback."""
+        if not message or not message.strip():
+            return "Please enter a question and I'll do my best to help."
+
+        kb_answer = search_knowledge_base(message)
+        if kb_answer is not None:
+            return kb_answer
+
+        try:
+            messages: list[dict[str, str]] = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+            ]
+            messages.extend(history)
+            messages.append({"role": "user", "content": message})
+
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+            )
+            return response.choices[0].message.content
+        except OpenAIError:
+            return (
+                "I couldn't find a matching answer in our knowledge base, "
+                "and my AI assistant is currently unavailable. "
+                "Please try again later or contact support@thoughtful.ai."
+            )
+        except Exception:
+            return "Something went wrong. Please try again."
+
+    return respond
 
 
-def get_llm_response(
-    message: str,
-    history: list[dict[str, str]],
-) -> str:
-    """Call OpenAI for questions not matched by the knowledge base."""
-    client = OpenAI()
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ]
-    messages.extend(history)
-    messages.append({"role": "user", "content": message})
+@click.command()
+@click.option("--model", type=str, help="OpenAI model name.", required=True)
+@click.option("--api-key", type=str, help="OpenAI API key.", required=True)
+@click.option("--port", type=int, help="Port to serve on.", required=True)
+@click.option("--share", is_flag=True, help="Create a public Gradio share link.")
+def main(model: str, api_key: str, port: int, share: bool) -> None:
+    client = AsyncOpenAI(api_key=api_key)
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
+    demo = gr.ChatInterface(
+        fn=build_respond(client, model),
+        title="Thoughtful AI Support Agent",
+        description=(
+            "Ask me about Thoughtful AI's healthcare automation agents, "
+            "including EVA, CAM, and PHIL."
+        ),
+        examples=[
+            "What does EVA do?",
+            "Tell me about your agents",
+            "What are the benefits of using Thoughtful AI?",
+        ],
     )
-    return response.choices[0].message.content
+    demo.launch(server_port=port, share=share)
 
-
-def respond(
-    message: str,
-    history: list[dict[str, str]],
-) -> str:
-    """Route user input to knowledge base search or LLM fallback."""
-    if not message or not message.strip():
-        return "Please enter a question and I'll do my best to help."
-
-    kb_answer = search_knowledge_base(message)
-    if kb_answer is not None:
-        return kb_answer
-
-    try:
-        return get_llm_response(message, history)
-    except OpenAIError:
-        return (
-            "I couldn't find a matching answer in our knowledge base, "
-            "and my AI assistant is currently unavailable. "
-            "Please try again later or contact support@thoughtful.ai."
-        )
-    except Exception:
-        return "Something went wrong. Please try again."
-
-
-demo = gr.ChatInterface(
-    fn=respond,
-    title="Thoughtful AI Support Agent",
-    description=(
-        "Ask me about Thoughtful AI's healthcare automation agents, "
-        "including EVA, CAM, and PHIL."
-    ),
-    examples=[
-        "What does EVA do?",
-        "Tell me about your agents",
-        "What are the benefits of using Thoughtful AI?",
-    ],
-)
 
 if __name__ == "__main__":
-    demo.launch()
+    main()
