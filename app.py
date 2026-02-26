@@ -38,37 +38,23 @@ class Agent:
         faiss.normalize_L2(matrix)
         return matrix
 
-    def build_index(self) -> tuple[list[str], list[str], faiss.IndexHNSWFlat]:
+    def build_index(self):
         client = OpenAI(api_key=self.config["openai"]["api_key"])
         model = self.config["openai"]["embedding_model"]
         batch_size = self.config["retrieval"]["embedding_batch_size"]
-        kb_path = Path(self.config["retrieval"]["kb_path"])
 
-        questions: list[str] = []
-        answers: list[str] = []
-        index: faiss.IndexHNSWFlat | None = None
-        batch: list[str] = []
-
-        for entry in read_jsonl(kb_path):
+        questions = []
+        answers = []
+        for entry in read_jsonl(Path(self.config["retrieval"]["kb_path"])):
             questions.append(entry["question"])
             answers.append(entry["answer"])
-            batch.append(entry["question"])
-            if len(batch) >= batch_size:
-                embeddings = self.to_matrix(
-                    client.embeddings.create(model=model, input=batch).data,
-                )
-                if index is None:
-                    index = faiss.IndexHNSWFlat(
-                        embeddings.shape[1],
-                        self.config["retrieval"]["hnsw_m"],
-                        faiss.METRIC_INNER_PRODUCT,
-                    )
-                index.add(embeddings)
-                batch.clear()
 
-        if batch:
+        index = None
+        for i in range(0, len(questions), batch_size):
             embeddings = self.to_matrix(
-                client.embeddings.create(model=model, input=batch).data,
+                client.embeddings.create(
+                    model=model, input=questions[i:i + batch_size],
+                ).data,
             )
             if index is None:
                 index = faiss.IndexHNSWFlat(
@@ -109,9 +95,7 @@ class Agent:
         prompt = self.prompt_template.replace("{{CONTEXT}}", context)
 
         try:
-            messages: list[dict[str, str]] = [
-                {"role": "system", "content": prompt},
-            ]
+            messages = [{"role": "system", "content": prompt}]
             messages.extend(history)
             messages.append({"role": "user", "content": message})
             response = await self.async_client.chat.completions.create(
@@ -120,11 +104,7 @@ class Agent:
             )
             return response.choices[0].message.content
         except OpenAIError:
-            return (
-                "I couldn't find a matching answer in our knowledge base, "
-                "and my AI assistant is currently unavailable. "
-                "Please try again later or contact support@thoughtful.ai."
-            )
+            return "Our AI assistant is currently unavailable. Please try again later."
 
 
 def main() -> None:
