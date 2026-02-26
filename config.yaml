@@ -1,0 +1,21 @@
+openai:
+  api_key: "YOUR_KEY"
+  chat_model: "gpt-4o-mini"
+  embedding_model: "text-embedding-3-small"
+
+retrieval:
+  kb_path: "knowledge_base.jsonl"
+  prompt_template_path: "system_prompt.txt"
+  threshold: 0.4
+  top_k: 3
+  embedding_batch_size: 2048
+
+server:
+  port: 7860
+  share: false
+  title: "Thoughtful AI Support Agent"
+  description: "Ask me about Thoughtful AI's healthcare automation agents, including EVA, CAM, and PHIL."
+  examples:
+    - "What does EVA do?"
+    - "Tell me about your agents"
+    - "What are the benefits of using Thoughtful AI?"
