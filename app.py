@@ -2,7 +2,6 @@
 import gradio as gr
 from openai import OpenAI, OpenAIError
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 KNOWLEDGE_BASE = [
     {
@@ -66,10 +65,9 @@ def search_knowledge_base(query: str) -> str | None:
     Returns the answer text if similarity >= threshold, else None.
     """
     query_vector = vectorizer.transform([query])
-    similarities = cosine_similarity(query_vector, question_vectors)[0]
-    best_idx = int(similarities.argmax())
-    best_score = float(similarities[best_idx])
-    if best_score >= SIMILARITY_THRESHOLD:
+    scores = (query_vector @ question_vectors.T).toarray().ravel()
+    best_idx = scores.argmax()
+    if scores[best_idx] >= SIMILARITY_THRESHOLD:
         return ANSWERS[best_idx]
     return None
 
