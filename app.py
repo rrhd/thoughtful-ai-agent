@@ -26,6 +26,7 @@ class RetrievalConfig(BaseModel):
     threshold: float
     top_k: int
     embedding_batch_size: int
+    hnsw_m: int
 
 
 class ServerConfig(BaseModel):
@@ -76,7 +77,7 @@ class Agent:
 
         questions: list[str] = []
         answers: list[str] = []
-        index: faiss.IndexFlatIP | None = None
+        index: faiss.IndexHNSWFlat | None = None
         batch: list[str] = []
 
         for entry in read_jsonl(kb_path):
@@ -88,7 +89,11 @@ class Agent:
                     client.embeddings.create(model=model, input=batch).data,
                 )
                 if index is None:
-                    index = faiss.IndexFlatIP(embeddings.shape[1])
+                    index = faiss.IndexHNSWFlat(
+                        embeddings.shape[1],
+                        self.config.retrieval.hnsw_m,
+                        faiss.METRIC_INNER_PRODUCT,
+                    )
                 index.add(embeddings)
                 batch.clear()
 
@@ -97,7 +102,11 @@ class Agent:
                 client.embeddings.create(model=model, input=batch).data,
             )
             if index is None:
-                index = faiss.IndexFlatIP(embeddings.shape[1])
+                index = faiss.IndexHNSWFlat(
+                    embeddings.shape[1],
+                    self.config.retrieval.hnsw_m,
+                    faiss.METRIC_INNER_PRODUCT,
+                )
             index.add(embeddings)
 
         if index is None:

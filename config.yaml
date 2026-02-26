@@ -9,6 +9,7 @@ retrieval:
   threshold: 0.4
   top_k: 3
   embedding_batch_size: 2048
+  hnsw_m: 32
 
 server:
   port: 7860
