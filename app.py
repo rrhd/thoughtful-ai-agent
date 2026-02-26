@@ -1,7 +1,8 @@
 """Thoughtful AI Customer Support Agent
 
 FAISS nearest-neighbor search over OpenAI embeddings for knowledge base
-retrieval, with async OpenAI LLM fallback for unmatched questions.
+retrieval, with async OpenAI LLM fallback (RAG pattern) for unmatched
+questions.
 
 OpenAI embeddings + FAISS: dense embeddings capture semantic similarity,
 FAISS scales to millions of entries. IndexFlatIP is used here for exact
@@ -10,6 +11,7 @@ search; for >1M entries, swap to IndexIVFFlat or IndexHNSWFlat.
 
 import json
 from pathlib import Path
+from typing import Generator
 
 import click
 import faiss
@@ -19,10 +21,23 @@ from openai import AsyncOpenAI, OpenAI, OpenAIError
 
 APP_DIR = Path(__file__).parent
 
+# OpenAI embeddings API accepts up to 2048 inputs per request
+EMBEDDING_BATCH_SIZE = 2048
 
-def load_knowledge_base(kb_path: Path) -> list[dict[str, str]]:
-    """Load entries from the knowledge base JSON file."""
-    return json.loads(kb_path.read_text())["questions"]
+# Best match checked against threshold; remaining top-k used as RAG
+# context for LLM fallback
+RETRIEVAL_TOP_K = 3
+
+
+def stream_knowledge_base(
+    kb_path: Path,
+) -> Generator[dict[str, str], None, None]:
+    """Yield entries one at a time from a JSONL knowledge base file."""
+    with kb_path.open() as fh:
+        for line in fh:
+            stripped = line.strip()
+            if stripped:
+                yield json.loads(stripped)
 
 
 def embed_sync(
@@ -53,33 +68,54 @@ async def embed_async(
     return matrix
 
 
-def build_faiss_index(
-    questions: list[str],
+def flush_embedding_batch(
     client: OpenAI,
     embedding_model: str,
+    batch: list[str],
+    index: faiss.IndexFlatIP | None,
 ) -> faiss.IndexFlatIP:
-    """Embed questions and build a FAISS inner-product index.
-
-    Vectors are L2-normalized, so inner product == cosine similarity.
-    """
-    embeddings = embed_sync(client, embedding_model, questions)
-    index = faiss.IndexFlatIP(embeddings.shape[1])
+    """Embed a batch and add to the FAISS index, creating it if needed."""
+    embeddings = embed_sync(client, embedding_model, batch)
+    if index is None:
+        index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
     return index
 
 
-def render_system_prompt(entries: list[dict[str, str]]) -> str:
-    """Inject knowledge base Q&A pairs into the prompt template."""
-    template = APP_DIR.joinpath("system_prompt.txt").read_text()
-    qa_text = "\n\n".join(
-        f"Q: {entry['question']}\nA: {entry['answer']}"
-        for entry in entries
-    )
-    return template.replace("{{KNOWLEDGE_BASE}}", qa_text)
+def build_faiss_index(
+    kb_path: Path,
+    client: OpenAI,
+    embedding_model: str,
+) -> tuple[faiss.IndexFlatIP, list[str], list[str]]:
+    """Stream JSONL, embed in batches, build FAISS index incrementally.
+
+    Returns (index, questions, answers). Questions and answers are parallel
+    lists aligned with the FAISS index row order.
+    """
+    questions: list[str] = []
+    answers: list[str] = []
+    index: faiss.IndexFlatIP | None = None
+    batch: list[str] = []
+
+    for entry in stream_knowledge_base(kb_path):
+        questions.append(entry["question"])
+        answers.append(entry["answer"])
+        batch.append(entry["question"])
+        if len(batch) >= EMBEDDING_BATCH_SIZE:
+            index = flush_embedding_batch(client, embedding_model, batch, index)
+            batch.clear()
+
+    if batch:
+        index = flush_embedding_batch(client, embedding_model, batch, index)
+
+    if index is None:
+        raise ValueError(f"No entries found in {kb_path}")
+
+    return index, questions, answers
 
 
 class Agent:
-    """Chat agent backed by async FAISS retrieval and async OpenAI fallback."""
+    """Chat agent backed by async FAISS retrieval and async OpenAI RAG fallback."""
 
     def __init__(
         self,
@@ -87,42 +123,61 @@ class Agent:
         llm_model: str,
         embedding_model: str,
         index: faiss.IndexFlatIP,
+        questions: list[str],
         answers: list[str],
         threshold: float,
-        system_prompt: str,
+        prompt_template: str,
     ):
         self.client = client
         self.llm_model = llm_model
         self.embedding_model = embedding_model
         self.index = index
+        self.questions = questions
         self.answers = answers
         self.threshold = threshold
-        self.system_prompt = system_prompt
+        self.prompt_template = prompt_template
 
-    async def search(self, query: str) -> str | None:
-        """Embed query via async OpenAI, then FAISS nearest-neighbor lookup."""
+    async def search(
+        self,
+        query: str,
+    ) -> list[tuple[str, str, float]]:
+        """Return top-k (question, answer, score) tuples from FAISS."""
         query_vec = await embed_async(self.client, self.embedding_model, [query])
-        scores, indices = self.index.search(query_vec, 1)
-        if scores[0][0] >= self.threshold:
-            return self.answers[indices[0][0]]
-        return None
+        scores, indices = self.index.search(query_vec, RETRIEVAL_TOP_K)
+        results: list[tuple[str, str, float]] = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx >= 0:
+                results.append((
+                    self.questions[idx],
+                    self.answers[idx],
+                    float(score),
+                ))
+        return results
 
     async def respond(
         self,
         message: str,
         history: list[dict[str, str]],
     ) -> str:
-        """Route to async KB search or async LLM fallback."""
+        """Route to async KB search or async LLM RAG fallback."""
         if not message or not message.strip():
             return "Please enter a question and I'll do my best to help."
 
-        kb_answer = await self.search(message)
-        if kb_answer is not None:
-            return kb_answer
+        results = await self.search(message)
+
+        if results and results[0][2] >= self.threshold:
+            return results[0][1]
+
+        # RAG: inject top-k retrieval results as LLM context
+        context = "\n\n".join(
+            f"Q: {question}\nA: {answer}"
+            for question, answer, score in results
+        )
+        prompt = self.prompt_template.replace("{{CONTEXT}}", context)
 
         try:
             messages: list[dict[str, str]] = [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": prompt},
             ]
             messages.extend(history)
             messages.append({"role": "user", "content": message})
@@ -151,11 +206,11 @@ class Agent:
 @click.option("--port", type=int, required=True, help="Port to serve on.")
 @click.option(
     "--kb-path", type=click.Path(exists=True, path_type=Path), required=True,
-    help="Path to knowledge_base.json.",
+    help="Path to knowledge base JSONL file.",
 )
 @click.option(
     "--threshold", type=float, required=True,
-    help="Cosine similarity threshold for KB matching.",
+    help="Cosine similarity threshold for direct KB answers.",
 )
 @click.option("--share", is_flag=True, help="Create a public Gradio share link.")
 def main(
@@ -167,26 +222,23 @@ def main(
     threshold: float,
     share: bool,
 ) -> None:
-    entries = load_knowledge_base(kb_path)
-    questions = [entry["question"] for entry in entries]
-    answers = [entry["answer"] for entry in entries]
-
     # Sync client for one-time startup index build (no event loop yet)
     sync_client = OpenAI(api_key=api_key)
-    index = build_faiss_index(questions, sync_client, embedding_model)
+    index, questions, answers = build_faiss_index(kb_path, sync_client, embedding_model)
 
     # Async client for runtime search + chat (used inside Gradio's event loop)
     async_client = AsyncOpenAI(api_key=api_key)
-    system_prompt = render_system_prompt(entries)
+    prompt_template = APP_DIR.joinpath("system_prompt.txt").read_text()
 
     agent = Agent(
         client=async_client,
         llm_model=model,
         embedding_model=embedding_model,
         index=index,
+        questions=questions,
         answers=answers,
         threshold=threshold,
-        system_prompt=system_prompt,
+        prompt_template=prompt_template,
     )
 
     demo = gr.ChatInterface(

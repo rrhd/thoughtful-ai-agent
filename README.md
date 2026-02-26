@@ -1,6 +1,6 @@
 # Thoughtful AI Support Agent
 
-Gradio chat UI backed by FAISS semantic retrieval (OpenAI embeddings) with async OpenAI LLM fallback.
+Gradio chat UI backed by FAISS semantic retrieval (OpenAI embeddings) with async OpenAI RAG fallback.
 
 ## Run
 
@@ -11,10 +11,10 @@ python app.py \
   --embedding-model text-embedding-3-small \
   --api-key YOUR_KEY \
   --port 7860 \
-  --kb-path knowledge_base.json \
+  --kb-path knowledge_base.jsonl \
   --threshold 0.4
 ```
 
 ## Architecture
 
-OpenAI embeddings encode the knowledge base questions into a FAISS `IndexFlatIP` index at startup (sync). At runtime, incoming queries are embedded async and matched via cosine similarity (inner product on L2-normalized vectors). Above `--threshold`: return the predefined answer. Below: async OpenAI chat call with the full knowledge base injected as system prompt context. For >1M entries, swap `IndexFlatIP` to `IndexIVFFlat` or `IndexHNSWFlat` for approximate search.
+Knowledge base is JSONL (one entry per line), streamed at startup. Questions are embedded in batches via OpenAI and added to a FAISS `IndexFlatIP` index incrementally. At runtime, queries are embedded async, and FAISS returns the top-k nearest neighbors. Above `--threshold`: return the predefined answer directly. Below: inject top-k results as context into the LLM prompt (RAG pattern). For >1M entries, swap `IndexFlatIP` to `IndexIVFFlat` or `IndexHNSWFlat`.
