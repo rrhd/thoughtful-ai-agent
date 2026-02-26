@@ -1,11 +1,12 @@
 openai:
-  api_key: "YOUR_KEY"
+  base_url: "YOUR_BASE_URL"
+  api_key: "YOUR_API_KEY"
   chat_model: "gpt-4o-mini"
   embedding_model: "text-embedding-3-small"
 
 retrieval:
   kb_path: "knowledge_base.jsonl"
-  prompt_template_path: "system_prompt.txt"
+  prompt_template_path: "prompt.yaml"
   threshold: 0.4
   top_k: 3
   embedding_batch_size: 2048

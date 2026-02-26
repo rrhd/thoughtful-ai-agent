@@ -1,19 +1,22 @@
 # Thoughtful AI Support Agent
 
-FAISS semantic retrieval (OpenAI embeddings) with async OpenAI RAG fallback. Gradio chat UI.
+Customer support chat agent with FAISS semantic search and LLM fallback.
 
-## Run
+## Setup
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` with your OpenAI API key, then:
+Edit `config.yaml` with your API base URL and key, then:
 
 ```bash
 python app.py
 ```
 
-## Architecture
+Opens at http://localhost:7860.
 
-Knowledge base is JSONL, streamed at startup. Questions are embedded in batches and added to a FAISS `IndexFlatIP` incrementally. At runtime, queries are embedded async, FAISS returns top-k neighbors. Above threshold: direct answer. Below: top-k injected as context into the LLM prompt (RAG). For >1M entries, swap `IndexFlatIP` to `IndexIVFFlat` or `IndexHNSWFlat`.
+## How it works
+
+Knowledge base (`knowledge_base.jsonl`) is embedded at startup into a FAISS HNSW index. Queries are embedded async, FAISS returns top-k neighbors. Above threshold: direct answer. Below: top-k results injected as context into an LLM call (RAG).
